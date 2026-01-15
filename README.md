@@ -64,7 +64,7 @@ pillow
 
 Model weights are hosted on Hugging Face:
 
-```👉 https://huggingface.co/YOUR_HF_USERNAME/fashion-category-ensemble-classifier```
+👉 https://huggingface.co/BrianBobbyJoe/fashion-category-ensemble-classifier
 
 Download the following files and place them inside the models/ directory:
 
@@ -80,7 +80,6 @@ Models expect 224×224 RGB images with model-specific preprocessing.
 python app.py
 ```
 Open your browser at:
-```bash
 http://127.0.0.1:5000/
-```
+
 
