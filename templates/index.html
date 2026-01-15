@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Fashion Category Classifier — Ensemble</title>
+
+  <!-- Link to external stylesheet -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+  <div class="container">
+    <!-- Left: upload -->
+    <div>
+      <div class="brand">
+        <div class="logo">F</div>
+        <div>
+          <h1>Fashion Category Classifier</h1>
+          <p class="lead">Ensemble (VGG16 + ResNet50) · Local demo</p>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div id="dropzone" class="dropzone" tabindex="0">
+          <div id="placeholder">
+            <svg width="56" height="56" viewBox="0 0 24 24" fill="none" style="opacity:0.9">
+              <path d="M12 3v12" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M8 7l4-4 4 4" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="white" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <div style="margin-top:6px; font-weight:700">Drag & Drop or Click to Upload</div>
+            <div class="info">Supported: JPEG, PNG, WebP (fallback). Max file size: 10 MB</div>
+          </div>
+
+          <!-- compact preview -->
+          <img id="preview" class="preview" src="" alt="preview" hidden>
+        </div>
+
+        <!-- stacked buttons: Choose file then Predict -->
+        <div class="controls">
+          <input id="fileInput" type="file" accept="image/*" style="display:none;">
+          <button id="chooseBtn" class="btn" type="button">Choose file</button>
+          <button id="uploadBtn" class="btn" type="button">Predict</button>
+        </div>
+
+        <div class="small" style="text-align:center; margin-top:8px;">
+          Tip: If your image is WebP and fails to load, make sure Pillow/imageio are installed on the server.
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: results -->
+    <div class="results">
+      <div class="card">
+        <div class="result-header">
+          <div>
+            <div class="small">Result</div>
+            <div class="pred">
+              <div class="label" id="predLabel">—</div>
+              <div class="confidence" id="predConf">—</div>
+            </div>
+          </div>
+          <div class="status" id="statusBox"></div>
+        </div>
+
+        <div id="topCard" style="margin-top:12px;">
+          <div class="small">Top predictions</div>
+          <div class="top-list" id="topList">
+            <!-- filled by JS -->
+          </div>
+        </div>
+
+        <div id="debugBox" class="debug" style="display:none;"></div>
+      </div>
+
+      <div class="card small">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <div>Model outputs</div>
+          <div style="font-size:13px; color:var(--muted)">Ensemble = 0.75·VGG + 0.25·ResNet</div>
+        </div>
+        <div id="modelRaw" style="margin-top:10px; display:flex; gap:12px; flex-wrap:wrap;"></div>
+      </div>
+
+      <footer>
+        Local demo • Keep models in your server's <code>models/</code> folder • <span style="color:var(--muted)">Made with care</span>
+      </footer>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // Elements
+  const dropzone = document.getElementById('dropzone');
+  const preview = document.getElementById('preview');
+  const fileInput = document.getElementById('fileInput');
+  const chooseBtn = document.getElementById('chooseBtn');
+  const uploadBtn = document.getElementById('uploadBtn');
+  const predLabel = document.getElementById('predLabel');
+  const predConf = document.getElementById('predConf');
+  const topList = document.getElementById('topList');
+  const statusBox = document.getElementById('statusBox');
+  const debugBox = document.getElementById('debugBox');
+  const modelRaw = document.getElementById('modelRaw');
+
+  const MAX_SIZE = 10 * 1024 * 1024; // 10MB
+  let currentFile = null;
+
+  // Small helper to show status with optional spinner
+  function showStatus(spinning=true, text="") {
+    statusBox.innerHTML = "";
+    if (spinning) {
+      const spinner = document.createElement('span');
+      spinner.className = 'spinner';
+      statusBox.appendChild(spinner);
+    }
+    if (text) {
+      const t = document.createElement('span');
+      t.style.color = 'var(--muted)';
+      t.style.fontSize = '13px';
+      t.style.marginLeft = '8px';
+      t.textContent = text;
+      statusBox.appendChild(t);
+    }
+  }
+
+  function resetResult() {
+    predLabel.textContent = "—";
+    predConf.textContent = "—";
+    topList.innerHTML = "";
+    debugBox.style.display = 'none';
+    modelRaw.innerHTML = "";
+    statusBox.innerHTML = "";
+    // hide preview and remove border marker
+    preview.src = "";
+    preview.hidden = true;
+    dropzone.classList.remove('has-image');
+  }
+
+  // Drag & drop UX
+  ['dragenter','dragover'].forEach(evt =>
+    dropzone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); dropzone.classList.add('dragover'); })
+  );
+  ['dragleave','dragend','drop'].forEach(evt =>
+    dropzone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); dropzone.classList.remove('dragover'); })
+  );
+
+  dropzone.addEventListener('drop', (e) => {
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) handleFileSelection(f);
+  });
+
+  dropzone.addEventListener('click', () => fileInput.click());
+  chooseBtn.addEventListener('click', () => fileInput.click());
+
+  fileInput.addEventListener('change', () => {
+    const f = fileInput.files[0];
+    if (f) handleFileSelection(f);
+  });
+
+  function handleFileSelection(file) {
+    resetResult();
+    if (!file.type.startsWith('image/')) {
+      alert('Please select an image file.');
+      return;
+    }
+    if (file.size > MAX_SIZE) {
+      alert('File too large. Max 10 MB.');
+      return;
+    }
+    currentFile = file;
+    const url = URL.createObjectURL(file);
+
+    // set preview thumbnail (enforced small by CSS)
+    preview.src = url;
+    preview.style.width = '140px';    // defensive inline sizing if needed
+    preview.style.height = '140px';
+    preview.style.objectFit = 'cover';
+    preview.hidden = false;
+
+    // add class so dropzone shows the dashed border (only after image uploaded)
+    dropzone.classList.add('has-image');
+  }
+
+  // Fetch with improved error handling
+  async function predictFile(file) {
+    if (!file) { alert('Choose an image first'); return; }
+    resetResult();
+    showStatus(true, "Uploading & predicting…");
+
+    const form = new FormData();
+    form.append('file', file);
+
+    try {
+      const resp = await fetch('/predict', { method: 'POST', body: form });
+      const contentType = resp.headers.get('content-type') || '';
+
+      if (!resp.ok) {
+        // show server error
+        if (contentType.includes('application/json')) {
+          const errJson = await resp.json();
+          debugBox.style.display = 'block';
+          debugBox.textContent = "Server error (JSON):\n" + JSON.stringify(errJson, null, 2);
+          showStatus(false, "Error");
+        } else {
+          const text = await resp.text();
+          debugBox.style.display = 'block';
+          debugBox.textContent = "Server error (HTML/text):\n" + text;
+          showStatus(false, "Error");
+        }
+        return;
+      }
+
+      // OK response
+      if (contentType.includes('application/json')) {
+        const data = await resp.json();
+        renderResult(data);
+        showStatus(false, "Ready");
+      } else {
+        const text = await resp.text();
+        debugBox.style.display = 'block';
+        debugBox.textContent = "Unexpected non-JSON response:\n" + text;
+        showStatus(false, "Unexpected response");
+      }
+    } catch (err) {
+      debugBox.style.display = 'block';
+      debugBox.textContent = "Request failed:\n" + (err && err.toString ? err.toString() : JSON.stringify(err));
+      showStatus(false, "Request failed");
+    }
+  }
+
+  function renderResult(data) {
+    // Main predicted label and confidence
+    predLabel.textContent = data.predicted_class || "—";
+    predConf.textContent = data.confidence ? (Math.round(data.confidence * 1000)/10) + "%" : "—";
+
+    // Top predictions as animated bars
+    topList.innerHTML = "";
+    const top = data.top_predictions || [];
+    top.forEach(item => {
+      const row = document.createElement('div'); row.className = 'prob-row';
+      const meta = document.createElement('div'); meta.className = 'prob-meta'; meta.textContent = item.class;
+      const wrap = document.createElement('div'); wrap.className = 'prob-bar-wrap';
+      const bar = document.createElement('div'); bar.className = 'prob-bar';
+      const percent = document.createElement('div'); percent.className = 'prob-percent';
+      const p = Math.max(0, Math.min(1, item.prob || 0));
+      percent.textContent = (p*100).toFixed(1) + "%";
+      bar.style.width = '0%';
+      wrap.appendChild(bar);
+      row.appendChild(meta);
+      row.appendChild(wrap);
+      row.appendChild(percent);
+      topList.appendChild(row);
+      requestAnimationFrame(() => {
+        bar.style.width = (p*100) + '%';
+      });
+    });
+
+    // Raw model vectors (first N)
+    modelRaw.innerHTML = "";
+    const vgg = data.vgg_pred || [];
+    const res = data.resnet_pred || [];
+    const showN = 6;
+    const makeBlock = (title, arr) => {
+      const box = document.createElement('div');
+      box.style.minWidth='220px';
+      box.style.flex='1';
+      box.style.background='rgba(255,255,255,0.02)';
+      box.style.padding='10px';
+      box.style.borderRadius='8px';
+      const t = document.createElement('div'); t.style.fontSize='13px'; t.style.color='var(--muted)'; t.textContent = title;
+      box.appendChild(t);
+      const list = document.createElement('div');
+      list.style.marginTop='8px'; list.style.fontSize='12px'; list.style.color='var(--muted)';
+      for (let i=0;i<Math.min(showN,arr.length);i++){
+        const row = document.createElement('div');
+        row.style.display='flex'; row.style.justifyContent='space-between';
+        const key = document.createElement('div'); key.textContent = (i<CLASS_NAMES.length ? CLASS_NAMES[i] : ("c"+i));
+        key.style.fontWeight='600';
+        const val = document.createElement('div'); val.textContent = (arr[i]*100).toFixed(1) + '%';
+        row.appendChild(key); row.appendChild(val); list.appendChild(row);
+      }
+      box.appendChild(list);
+      return box;
+    };
+    const vggBox = makeBlock('VGG top probs', vgg);
+    const resBox = makeBlock('ResNet top probs', res);
+    modelRaw.appendChild(vggBox);
+    modelRaw.appendChild(resBox);
+
+    // show debug payload
+    debugBox.style.display = 'block';
+    debugBox.textContent = "Full JSON response:\n" + JSON.stringify(data, null, 2);
+  }
+
+  // constants for display
+  const CLASS_NAMES = [
+    'Blazer','Blouse','Cardigan','Jacket','Jeans','Jumpsuit',
+    'Romper','Shorts','Skirt','Sweater','Sweatpants','Tank','Tee','Top'
+  ];
+
+  // hook upload
+  uploadBtn.addEventListener('click', () => {
+    if (!currentFile) { alert('No file selected'); return; }
+    predictFile(currentFile);
+  });
+
+  // keyboard accessibility - allow Enter to open
+  dropzone.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') fileInput.click(); });
+
+})();
+</script>
+</body>
+</html>
